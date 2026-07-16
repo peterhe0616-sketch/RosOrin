@@ -1,0 +1,22 @@
+# Python environments and caches
+.venv/
+.venv3d/
+__pycache__/
+*.py[cod]
+
+# Runtime and profiling artifacts
+*.log
+*.pstats
+kernel.errors.txt
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Hugging Face download cache (keep the model itself)
+models/**/.cache/
+
+# Downloaded model weights (keep model metadata in Git)
+*.onnx

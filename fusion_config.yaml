@@ -1,0 +1,52 @@
+# Initial ROSOrin USB-camera / LD19 geometry.
+# Replace these transforms after a proper camera-LiDAR extrinsic calibration.
+
+model:
+  path: models/depth-anything-v2-small/onnx/model_fp16.onnx
+  device: GPU
+  input_width: 518
+  input_height: 392
+  performance_mode: THROUGHPUT
+  num_streams: 2
+  async_requests: 4
+
+depth:
+  min_m: 0.30
+  max_m: 8.0
+  pixel_stride: 10
+  edge_percentile: 82
+  max_points_per_frame: 7000
+  scale_ema: 0.18
+  min_lidar_matches: 10
+  lidar_match_radius_px: 4
+
+cloud:
+  history_seconds: 1.5
+  voxel_size_m: 0.08
+  point_size_px: 8.0
+  pointmap_stride: 4
+  max_current_points: 60000
+
+mapping:
+  voxel_size_m: 0.05
+  max_points: 250000
+  min_translation_m: 0.06
+  min_rotation_deg: 3.0
+  observation_blend: 0.25
+
+# Point in camera optical coordinates -> point in base_link coordinates.
+# Optical axes: +x right, +y down, +z forward.
+# Base axes: +x forward, +y left, +z up.
+camera_to_base:
+  - [0.0, 0.0, 1.0, 0.057373]
+  - [-1.0, 0.0, 0.0, 0.000079]
+  - [0.0, -1.0, 0.0, 0.091864]
+  - [0.0, 0.0, 0.0, 1.0]
+
+# Point in lidar_frame coordinates -> point in camera optical coordinates.
+# Initial estimate derived from the robot URDF mounting positions.
+lidar_to_camera:
+  - [0.0, -1.0, 0.0, 0.000005]
+  - [0.0, 0.0, -1.0, -0.044546]
+  - [1.0, 0.0, 0.0, -0.045897]
+  - [0.0, 0.0, 0.0, 1.0]

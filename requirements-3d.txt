@@ -1,0 +1,7 @@
+numpy>=1.26,<3
+opencv-python>=4.9
+open3d>=0.19
+openvino>=2025.2
+pyyaml>=6.0
+roslibpy>=2.0
+
