@@ -1,0 +1,9 @@
+numpy>=1.26,<3
+opencv-python>=4.9
+openvino>=2026.1
+openvino-genai>=2026.1
+open3d>=0.19
+pyyaml>=6.0
+roslibpy>=2.0
+
+# Conversion-only packages are installed by setup_vla.ps1.

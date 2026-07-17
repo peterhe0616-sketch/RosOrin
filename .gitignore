@@ -1,6 +1,7 @@
 # Python environments and caches
 .venv/
 .venv3d/
+.venv-vla/
 __pycache__/
 *.py[cod]
 
@@ -20,3 +21,6 @@ models/**/.cache/
 
 # Downloaded model weights (keep model metadata in Git)
 *.onnx
+models/qwen3-vl-4b-source/
+models/qwen3-vl-4b-int4-ov/
+models/qwen3-vl-cache/

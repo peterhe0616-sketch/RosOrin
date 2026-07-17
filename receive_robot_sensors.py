@@ -11,10 +11,15 @@ import signal
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
 
 import cv2
 import numpy as np
 import roslibpy
+
+from semantic_supervisor import SafetyDecision, SafetyPolicy, compute_lidar_sectors
+from qwen_vl_runtime import VLARequest, VLAWorker
 
 WINDOW_NAME = "ROSOrin Camera + LiDAR - ESC to quit"
 DISTORTION_TRACKBAR = "Distortion: -10x < 0 > +10x"
@@ -100,7 +105,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--duration", type=float, default=0, help="Exit after N seconds; 0 runs forever"
     )
-    return parser.parse_args()
+    vla_mode = parser.add_mutually_exclusive_group()
+    vla_mode.add_argument("--vla", action="store_true", help="Enable passive Qwen3-VL observation")
+    vla_mode.add_argument("--assist", action="store_true", help="Show guarded VLM driving suggestions")
+    vla_mode.add_argument("--auto", action="store_true", help="Allow guarded VLM commands; WASD overrides")
+    parser.add_argument("--vla-config", default="vla_config.yaml")
+    parser.add_argument("--vla-model", help="Override OpenVINO Qwen3-VL model directory")
+    parser.add_argument("--vla-device", help="Override VLM OpenVINO device, e.g. GPU or CPU")
+    parser.add_argument("--vla-interval", type=float, help="Seconds between VLM requests")
+    parser.add_argument("--vla-instruction", help="Natural-language driving task")
+    args = parser.parse_args()
+    if args.auto and args.no_control:
+        parser.error("--auto requires control; remove --no-control")
+    return args
 
 
 def finite_min(values: list[float]) -> float:
@@ -242,14 +259,17 @@ class WasdController:
         stop: threading.Event,
         linear_speed: float,
         angular_speed: float,
+        auto_provider: Callable[[], tuple[float, float, str]] | None = None,
     ) -> None:
         self.topic = topic
         self.state = state
         self.stop = stop
         self.linear_speed = abs(linear_speed)
         self.angular_speed = abs(angular_speed)
+        self.auto_provider = auto_provider
         self.thread: threading.Thread | None = None
         self.last_command = (0.0, 0.0)
+        self.last_manual_time = -math.inf
 
     @staticmethod
     def pressed(key: str) -> bool:
@@ -267,10 +287,17 @@ class WasdController:
             keys = {key for key in "WASD" if self.pressed(key)}
             linear = (float("W" in keys) - float("S" in keys)) * self.linear_speed
             angular = (float("A" in keys) - float("D" in keys)) * self.angular_speed
+            label = "+".join(key for key in "WASD" if key in keys) or "IDLE"
+            if keys:
+                self.last_manual_time = time.monotonic()
+            elif self.auto_provider is not None and time.monotonic() - self.last_manual_time < 1.0:
+                linear, angular, label = 0.0, 0.0, "MANUAL:HOLD"
+            elif self.auto_provider is not None:
+                linear, angular, label = self.auto_provider()
             command = (linear, angular)
 
             # Publish continuously while a key is held, and publish zero once on release.
-            if keys or command != self.last_command:
+            if keys or label.startswith("AUTO") or command != self.last_command:
                 self.topic.publish(
                     roslibpy.Message(
                         {
@@ -281,7 +308,7 @@ class WasdController:
                 )
             self.last_command = command
             with self.state.lock:
-                self.state.control_keys = "+".join(key for key in "WASD" if key in keys) or "IDLE"
+                self.state.control_keys = label
                 self.state.control_linear = linear
                 self.state.control_angular = angular
             time.sleep(0.05)
@@ -289,6 +316,14 @@ class WasdController:
     def close(self) -> None:
         if self.thread is not None:
             self.thread.join(timeout=1.0)
+        self.topic.publish(
+            roslibpy.Message(
+                {
+                    "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
+                }
+            )
+        )
         self.topic.unadvertise()
 
 
@@ -390,6 +425,7 @@ def compose_dashboard(
     angular: float,
     undistorted: bool,
     distortion_strength: float,
+    vla_display: dict | None = None,
 ) -> np.ndarray:
     if camera_frame is None:
         content = lidar_frame
@@ -405,7 +441,8 @@ def compose_dashboard(
         draw_text(camera, camera_label, (18, 28), (235, 240, 242), 0.62)
         content = np.hstack((camera, lidar_frame))
 
-    header = np.full((48, content.shape[1], 3), (28, 34, 39), dtype=np.uint8)
+    header_height = 86 if vla_display is not None else 48
+    header = np.full((header_height, content.shape[1], 3), (28, 34, 39), dtype=np.uint8)
     active = control_keys != "IDLE"
     color = (80, 225, 150) if active else (155, 170, 178)
     draw_text(header, f"WASD: {control_keys}", (18, 30), color, 0.62)
@@ -416,6 +453,21 @@ def compose_dashboard(
         (220, 230, 235),
         0.55,
     )
+    if vla_display is not None:
+        status = str(vla_display.get("status", "disabled"))
+        action = str(vla_display.get("action", "WAIT"))
+        confidence = float(vla_display.get("confidence", 0.0))
+        latency = float(vla_display.get("latency_ms", math.nan))
+        mode = str(vla_display.get("mode", "observe")).upper()
+        decision = str(vla_display.get("decision", "STOP"))
+        color = (80, 225, 150) if status == "ready" else (80, 190, 245)
+        draw_text(
+            header,
+            f"VLM {mode}: {status}  action={action}  safe={decision}  conf={confidence:.2f}  {latency:.0f}ms",
+            (18, 70),
+            color,
+            0.55,
+        )
     return np.vstack((header, content))
 
 
@@ -531,6 +583,64 @@ def main() -> int:
     odom.subscribe(on_odom)
     print("Subscribed: /scan_raw, /imu, /odom and camera_info")
 
+    vla_enabled = bool(args.vla or args.assist or args.auto)
+    vla_mode = "auto" if args.auto else "assist" if args.assist else "observe"
+    vla_worker = None
+    vla_policy = None
+    vla_config: dict = {}
+    vla_instruction = ""
+    vla_interval = 2.0
+    if vla_enabled:
+        try:
+            import yaml
+
+            config_path = Path(args.vla_config)
+            with config_path.open("r", encoding="utf-8") as stream:
+                vla_config = yaml.safe_load(stream) or {}
+            if args.vla_model:
+                vla_config["model_dir"] = args.vla_model
+            if args.vla_device:
+                vla_config["device"] = args.vla_device
+            if args.vla_interval is not None:
+                vla_config["interval_s"] = args.vla_interval
+            if args.vla_instruction:
+                vla_config["instruction"] = args.vla_instruction
+            vla_instruction = str(vla_config.get("instruction", "谨慎低速前进"))
+            vla_interval = max(0.25, float(vla_config.get("interval_s", 2.0)))
+            vla_policy = SafetyPolicy(vla_config.get("safety", {}))
+            vla_worker = VLAWorker(vla_config)
+            vla_worker.start()
+            print(
+                f"Qwen3-VL {vla_mode} enabled: {vla_config.get('model_dir')} "
+                f"on {vla_config.get('device', 'GPU')}"
+            )
+            print(f"VLA instruction: {vla_instruction}")
+        except Exception as exc:
+            print(f"VLA disabled: {exc}")
+            vla_enabled = False
+            if args.auto:
+                print("Automatic control requested but VLA initialization failed; stopping.")
+                ros.terminate()
+                return 1
+
+    def guarded_auto_command() -> tuple[float, float, str]:
+        if vla_mode != "auto" or vla_worker is None or vla_policy is None:
+            return 0.0, 0.0, "IDLE"
+        with state.lock:
+            ranges = list(state.lidar_ranges)
+            angle_min = state.lidar_angle_min
+            angle_increment = state.lidar_angle_increment
+            range_min = state.lidar_range_min
+            range_max = state.lidar_range_max
+        sectors = compute_lidar_sectors(
+            ranges, angle_min, angle_increment, range_min, range_max
+        )
+        snapshot = vla_worker.state.snapshot()
+        result_time = float(snapshot["result_time"])
+        age = time.monotonic() - result_time if result_time > 0 else math.inf
+        decision = vla_policy.evaluate(snapshot["result"], sectors, age)
+        return decision.linear, decision.angular, f"AUTO:{decision.action}"
+
     controller = None
     if not args.no_control:
         controller = WasdController(
@@ -539,6 +649,7 @@ def main() -> int:
             stop,
             args.linear_speed,
             args.angular_speed,
+            guarded_auto_command if args.auto else None,
         )
         controller.start()
         print("WASD control enabled: /controller/cmd_vel")
@@ -628,6 +739,7 @@ def main() -> int:
             )
     last_report = started
     last_counts = (0, 0, 0)
+    vla_last_submit = -math.inf
 
     try:
         while not stop.is_set():
@@ -695,6 +807,37 @@ def main() -> int:
                 control_linear = state.control_linear
                 control_angular = state.control_angular
                 odom_from_base = state.odom_from_base.copy()
+
+            sectors = compute_lidar_sectors(
+                scan_ranges,
+                scan_angle_min,
+                scan_angle_increment,
+                scan_range_min,
+                scan_range_max,
+            )
+            vla_snapshot = vla_worker.state.snapshot() if vla_worker is not None else None
+            vla_decision: SafetyDecision | None = None
+            if vla_snapshot is not None and vla_policy is not None:
+                result_time = float(vla_snapshot["result_time"])
+                result_age = now - result_time if result_time > 0 else math.inf
+                vla_decision = vla_policy.evaluate(vla_snapshot["result"], sectors, result_age)
+            if (
+                vla_worker is not None
+                and camera_frame is not None
+                and now - vla_last_submit >= vla_interval
+                and vla_snapshot is not None
+                and vla_snapshot["status"] in {"ready", "inferencing"}
+            ):
+                if vla_worker.submit(
+                    VLARequest(
+                        frame=camera_frame.copy(),
+                        instruction=vla_instruction,
+                        sectors=sectors,
+                        linear=control_linear,
+                        angular=control_angular,
+                    )
+                ):
+                    vla_last_submit = now
 
             pointmap_updated = False
             if pointmap_viewer is not None and pointmap_pending:
@@ -805,6 +948,26 @@ def main() -> int:
                     control_angular,
                     camera_is_undistorted if camera_frame is not None else False,
                     distortion_strength,
+                    (
+                        {
+                            "mode": vla_mode,
+                            "status": vla_snapshot["status"],
+                            "action": (
+                                vla_snapshot["result"].action
+                                if vla_snapshot["result"] is not None
+                                else "WAIT"
+                            ),
+                            "confidence": (
+                                vla_snapshot["result"].confidence
+                                if vla_snapshot["result"] is not None
+                                else 0.0
+                            ),
+                            "latency_ms": vla_snapshot["latency_ms"],
+                            "decision": vla_decision.action if vla_decision else "STOP",
+                        }
+                        if vla_snapshot is not None
+                        else None
+                    ),
                 )
                 cv2.imshow(WINDOW_NAME, dashboard)
                 if cv2.waitKey(1) & 0xFF == 27:
@@ -827,6 +990,16 @@ def main() -> int:
                     f"map={pointmap_points}pts/{map_builder.keyframes if map_builder else 0}kf "
                     f"infer={pointmap_inference_ms:.0f}ms"
                 )
+                if vla_snapshot is not None:
+                    result = vla_snapshot["result"]
+                    print(
+                        f"  VLM mode={vla_mode} status={vla_snapshot['status']} "
+                        f"action={result.action if result else 'WAIT'} "
+                        f"safe={vla_decision.action if vla_decision else 'STOP'} "
+                        f"confidence={result.confidence if result else 0.0:.2f} "
+                        f"latency={vla_snapshot['latency_ms']:.0f}ms "
+                        f"error={vla_snapshot['error'] or '-'}"
+                    )
                 last_counts = counts
                 last_report = now
     finally:
@@ -836,6 +1009,8 @@ def main() -> int:
         odom.unsubscribe()
         if controller is not None:
             controller.close()
+        if vla_worker is not None:
+            vla_worker.close()
         if capture is not None:
             capture.release()
         if pointmap_viewer is not None:

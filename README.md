@@ -51,8 +51,13 @@ Robot ROS 2
 - `realtime_sparse_3d.py`：深度推理、LiDAR 校正、点云融合和 Open3D 显示
 - `fusion_config.yaml`：模型、深度、点云、地图及传感器外参配置
 - `README-3D.md`：三维融合的运行方式、参数和标定说明
+- `README-VLA.md`：Qwen3-VL INT4 安装、基准、语义驾驶与安全模式
 - `requirements.txt` / `requirements-3d.txt`：基础与三维环境依赖
 - `models/depth-anything-v2-small/`：Depth Anything V2 Small 配置；ONNX FP16 权重为本地依赖，不纳入 Git
+
+## Qwen3-VL 语义驾驶
+
+电脑端可通过 OpenVINO 运行 Qwen3-VL-4B INT4，把相机画面、LiDAR 扇区距离和中文任务转换成受限的高级动作建议。先运行 `setup_vla.ps1` 安装并转换模型，再按照 `README-VLA.md` 从观察模式逐步验证到封闭场地低速自动模式。
 
 实时稀疏三维视线模型见 `README-3D.md`。
 
