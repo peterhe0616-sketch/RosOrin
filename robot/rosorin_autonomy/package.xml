@@ -3,7 +3,7 @@
   <name>rosorin_autonomy</name>
   <version>0.1.0</version>
   <description>SLAM, Nav2, recovery and remote semantic-navigation bridge for ROSOrin.</description>
-  <maintainer email="peter@localhost">Peter</maintainer>
+  <maintainer email="peter@example.com">Peter</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_python</buildtool_depend>

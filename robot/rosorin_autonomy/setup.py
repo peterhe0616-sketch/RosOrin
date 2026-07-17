@@ -17,12 +17,13 @@ setup(
     install_requires=["setuptools"],
     zip_safe=True,
     maintainer="Peter",
-    maintainer_email="peter@localhost",
+    maintainer_email="peter@example.com",
     description="ROSOrin autonomy bridge and Nav2 configuration",
     license="MIT",
     entry_points={
         "console_scripts": [
             "autonomy_bridge = rosorin_autonomy.autonomy_bridge:main",
+            "scan_normalizer = rosorin_autonomy.scan_normalizer:main",
         ],
     },
 )

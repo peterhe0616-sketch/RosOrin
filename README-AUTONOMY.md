@@ -4,7 +4,7 @@
 
 ## 已实现功能
 
-- `slam_toolbox` 使用 `/scan_raw` 实时生成二维占据栅格，并发布 `map -> odom` 定位变换
+- `scan_normalizer` 把 LD19 每圈轻微波动的原始点数固定为 504 点；`slam_toolbox` 使用 `/scan_slam` 实时生成二维占据栅格，并发布 `map -> odom` 定位变换（安全避障仍直接读取 `/scan_raw`）
 - 现有 `robot_localization` 融合轮式里程计与 IMU，Nav2 使用 `map / odom / base_footprint` 完成实时定位
 - NavFn A* 全局规划、DWB 局部规划、20 Hz 速度平滑和连续绕障
 - 前、后、左、右均使用 `0.16 m` 的最终碰撞停止边界；局部和全局代价地图膨胀半径为 `0.16 m`
@@ -50,6 +50,8 @@ cd D:\RosOrin
 ```text
 /home/pi/docker/tmp/rosorin_autonomy.log
 ```
+
+`system.launch.py` 复用厂商 controller、相机、LiDAR、rosbridge 与 web video launch，但不启动会长期占用 CPU 的 YOLO、循线、旧自驾、目标跟踪和手柄演示；预留 15 秒给 IMU 校准和里程计/TF 稳定后再启动 SLAM/Nav2。
 
 若只想更新和编译而不启动：
 

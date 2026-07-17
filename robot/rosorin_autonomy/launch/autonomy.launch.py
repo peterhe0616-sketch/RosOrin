@@ -15,12 +15,20 @@ def generate_launch_description():
     slam_params_file = LaunchConfiguration("slam_params_file")
     collision_params_file = LaunchConfiguration("collision_params_file")
 
+    scan_normalizer = Node(
+        package="rosorin_autonomy",
+        executable="scan_normalizer",
+        name="scan_normalizer",
+        output="screen",
+        parameters=[{"input_topic": "/scan_raw", "output_topic": "/scan_slam", "bins": 504}],
+    )
+
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             str(Path(get_package_share_directory("slam_toolbox")) / "launch" / "online_async_launch.py")
         ),
         launch_arguments={
-            "use_sim_time": "false",
+            "use_sim_time": "False",
             "slam_params_file": slam_params_file,
         }.items(),
     )
@@ -33,9 +41,9 @@ def generate_launch_description():
                     str(nav2_dir / "launch" / "navigation_launch.py")
                 ),
                 launch_arguments={
-                    "use_sim_time": "false",
-                    "autostart": "true",
-                    "use_composition": "false",
+                    "use_sim_time": "False",
+                    "autostart": "True",
+                    "use_composition": "False",
                     "params_file": params_file,
                 }.items(),
             ),
@@ -97,6 +105,7 @@ def generate_launch_description():
                 "collision_params_file",
                 default_value=str(package_dir / "config" / "collision_monitor.yaml"),
             ),
+            scan_normalizer,
             slam,
             nav,
             collision_monitor,

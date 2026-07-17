@@ -29,7 +29,7 @@ try {
 
     Write-Host "ROSOrin autonomy package deployed without reinstalling ROS 2."
     if ($Start) {
-        $Run = "source /opt/ros/humble/setup.bash && source /home/ubuntu/ros2_ws/install/setup.bash && ros2 launch rosorin_autonomy autonomy.launch.py"
+        $Run = "source /home/ubuntu/shared/.typerc >/dev/null && source /opt/ros/humble/setup.bash && source /home/ubuntu/third_party_ros2/third_party_ws/install/setup.bash && source /home/ubuntu/ros2_ws/install/setup.bash && ros2 launch rosorin_autonomy system.launch.py"
         ssh $SshHost "docker exec -d $Container bash -lc '$Run >/home/ubuntu/shared/rosorin_autonomy.log 2>&1'"
         if ($LASTEXITCODE -ne 0) { throw "Autonomy launch failed" }
         Write-Host "Autonomy stack started. Log: /home/pi/docker/tmp/rosorin_autonomy.log"
