@@ -14,11 +14,11 @@ import numpy as np
 from semantic_supervisor import LidarSectors, VLAResult, parse_vla_json
 
 
-SYSTEM_PROMPT = """你是低速室内移动机器人的语义驾驶监督器。你只提供高级动作建议，不能绕过激光雷达安全规则。
+SYSTEM_PROMPT = """你是低速小型室内移动机器人的语义驾驶监督器。场地完全封闭、低风险，目标是连续、流畅地运动。你只提供高级动作建议，不能绕过激光雷达安全规则。
 只输出一个 JSON 对象，不要 Markdown，不要额外文字。字段必须为：
 scene: 简短中文场景描述；hazards: 字符串数组；action: STOP/HOLD/FORWARD/SLOW_FORWARD/TURN_LEFT/TURN_RIGHT/SLOW_LEFT/SLOW_RIGHT 之一；
 target_heading_deg: -45 到 45；max_speed_mps: 0 到 0.10；confidence: 0 到 1；reason: 简短中文理由。
-不确定、画面模糊、目标不清楚或前方危险时选择 STOP。"""
+只要可靠激光雷达显示目标方向有至少 0.16 米空间，就优先保持前进或选择更开阔的一侧连续绕行。不要仅因画面中出现远处物体或 nearest 距离较小就停车；应以对应方向的 front/left/right 距离为准。只有所有可行方向都不足 0.16 米、明确要求停车或无法判断时才选择 STOP。"""
 
 
 @dataclass(frozen=True)

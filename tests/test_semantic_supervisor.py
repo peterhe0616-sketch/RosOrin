@@ -22,8 +22,8 @@ class SemanticSupervisorTests(unittest.TestCase):
                 "stop_distance_m": 0.16,
                 "turn_clearance_m": 0.16,
                 "minimum_confidence": 0.65,
-                "max_result_age_s": 5.0,
-                "max_command_duration_s": 0.6,
+                "max_result_age_s": 15.0,
+                "max_command_duration_s": 12.0,
                 "require_lidar": True,
                 "max_linear_mps": 0.10,
                 "max_angular_radps": 0.35,
@@ -57,7 +57,7 @@ class SemanticSupervisorTests(unittest.TestCase):
     def test_low_confidence_and_stale_results_stop(self):
         sectors = LidarSectors(front=2.0, left=2.0, right=2.0)
         self.assertEqual(self.policy.evaluate(self.result(confidence=0.2), sectors, 0.1).action, "STOP")
-        self.assertEqual(self.policy.evaluate(self.result(), sectors, 10.0).action, "STOP")
+        self.assertEqual(self.policy.evaluate(self.result(), sectors, 16.0).action, "STOP")
 
     def test_safe_turn_is_bounded(self):
         decision = self.policy.evaluate(
@@ -67,12 +67,19 @@ class SemanticSupervisorTests(unittest.TestCase):
         self.assertEqual(decision.linear, 0.0)
         self.assertLessEqual(decision.angular, 0.35)
 
-    def test_motion_command_is_a_short_pulse(self):
+    def test_motion_command_is_held_between_vlm_updates(self):
         decision = self.policy.evaluate(
             self.result(), LidarSectors(front=2.0, left=2.0, right=2.0), 0.8
         )
+        self.assertEqual(decision.action, "FORWARD")
+        self.assertGreater(decision.linear, 0.0)
+
+    def test_motion_command_eventually_expires(self):
+        decision = self.policy.evaluate(
+            self.result(), LidarSectors(front=2.0, left=2.0, right=2.0), 12.5
+        )
         self.assertEqual(decision.action, "STOP")
-        self.assertIn("pulse", decision.reason)
+        self.assertIn("expired", decision.reason)
 
     def test_missing_lidar_vetoes_motion(self):
         decision = self.policy.evaluate(self.result(), LidarSectors(), 0.1)

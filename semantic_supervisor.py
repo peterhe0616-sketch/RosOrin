@@ -122,7 +122,7 @@ class SafetyPolicy:
         self.turn_clearance = float(config.get("turn_clearance_m", 0.30))
         self.minimum_confidence = float(config.get("minimum_confidence", 0.65))
         self.max_result_age = float(config.get("max_result_age_s", 5.0))
-        self.max_command_duration = float(config.get("max_command_duration_s", 0.6))
+        self.max_command_duration = float(config.get("max_command_duration_s", 12.0))
         self.require_lidar = bool(config.get("require_lidar", True))
         self.max_linear = abs(float(config.get("max_linear_mps", 0.10)))
         self.max_angular = abs(float(config.get("max_angular_radps", 0.35)))
@@ -147,7 +147,7 @@ class SafetyPolicy:
         if result.action in {"STOP", "HOLD"}:
             return SafetyDecision(result.action, 0.0, 0.0, True, result.reason or result.action)
         if result_age_s > self.max_command_duration:
-            return self.stop(f"motion pulse expired ({result_age_s:.1f}s)")
+            return self.stop(f"motion command expired ({result_age_s:.1f}s)")
         if self.require_lidar and not math.isfinite(sectors.front):
             return self.stop("front LiDAR sector unavailable")
 

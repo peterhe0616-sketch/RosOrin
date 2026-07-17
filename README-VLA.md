@@ -88,7 +88,7 @@ VLA 与稠密三维点图可以同时运行，但会争用同一块 Intel GPU。
 
 ```powershell
 .\.venv-vla\Scripts\python.exe .\receive_robot_sensors.py --auto --no-3d `
-  --vla-instruction "沿前方空旷区域低速前进，遇到人或不确定情况停车"
+  --vla-instruction "持续沿可通行区域流畅行驶，接近障碍时从更开阔的一侧绕行，只有无法通过时停车"
 ```
 
 自动模式下：
@@ -98,7 +98,7 @@ VLA 与稠密三维点图可以同时运行，但会争用同一块 Intel GPU。
 - LiDAR 前方扇区没有有效数据时，禁止任何自动运动。
 - 前方小于 `stop_distance_m` 时，前进和带前进分量的转向会被否决。
 - 左/右空间不足时，对应转向会被否决。
-- 每个非零运动命令只保持 `max_command_duration_s`，默认 0.6 秒；随后自动归零。
+- 最近一次通过安全检查的非零动作会连续保持到下一次 VLM 更新，最长 `max_command_duration_s`，当前为 12 秒；LiDAR 安全检查仍以约 20 Hz 持续运行并可立即归零。
 - 松开人工 WASD 后有 1 秒自动控制冷却期。
 
 当前前方停车距离 `stop_distance_m` 和左右转向净空 `turn_clearance_m` 均为 `0.16 m`。

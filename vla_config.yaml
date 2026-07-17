@@ -2,7 +2,7 @@ model_dir: models/qwen3-vl-4b-int4-ov
 source_model_dir: models/qwen3-vl-4b-source
 device: GPU
 cache_dir: models/qwen3-vl-cache
-instruction: 沿前方可通行区域低速行驶，遇到人或不确定情况停车
+instruction: 持续沿可通行区域流畅行驶，接近障碍时选择更开阔的一侧绕行，只有无法通过时停车
 interval_s: 2.0
 image_max_side: 448
 max_new_tokens: 96
@@ -12,7 +12,7 @@ safety:
   turn_clearance_m: 0.16
   minimum_confidence: 0.65
   max_result_age_s: 15.0
-  max_command_duration_s: 0.6
+  max_command_duration_s: 12.0
   require_lidar: true
   max_linear_mps: 0.10
   max_angular_radps: 0.35
