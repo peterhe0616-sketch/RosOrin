@@ -9,6 +9,7 @@ __pycache__/
 *.log
 *.pstats
 kernel.errors.txt
+state/
 
 # IDE and OS files
 .idea/

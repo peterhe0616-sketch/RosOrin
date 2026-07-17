@@ -13,6 +13,10 @@ ROSOrin 是一个运行在 Windows 电脑端的机器人感知与控制原型。
 - 实现滚动局部点云、关键帧增量体素地图和 Open3D 实时三维显示
 - 支持 Intel Arc GPU 上的 OpenVINO FP16 推理，并可切换 CPU/GPU
 - 提供 YAML 参数化配置、无窗口性能测试和 RGB/深度/LiDAR 调试预览
+- 新增树莓派端 `slam_toolbox + Nav2 + robot_localization` 自主导航栈：二维建图、实时定位、全局/局部规划、连续避障、受控倒车和卡住恢复
+- 新增电脑端 Qwen3-VL 连续场景控制台：1 Hz 连续帧采样、跨轮场景记忆、地图选点、实时提示词和可核验的逐轮决策理由
+
+完整部署与使用说明见 [README-AUTONOMY.md](README-AUTONOMY.md)。
 
 ## 技术栈
 
@@ -26,6 +30,8 @@ ROSOrin 是一个运行在 Windows 电脑端的机器人感知与控制原型。
 | 三维处理与可视化 | Open3D、点云反投影、体素降采样、关键帧地图 |
 | 多传感器融合 | 相机内外参、LiDAR 投影、鲁棒仿射深度标定、里程计坐标变换 |
 | 配置 | YAML |
+| 二维自主导航 | ROS 2 Humble、slam_toolbox、Nav2、DWB、Collision Monitor |
+| 连续多模态规划 | Qwen3-VL-4B INT4、OpenVINO GenAI Chat、Gradio |
 
 ## 数据流
 

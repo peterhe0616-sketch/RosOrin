@@ -4,6 +4,8 @@
 
 Qwen3-VL 的输出是不可信的高级动作建议。`semantic_supervisor.py` 会检查结果时效、置信度和 LiDAR 距离，并把速度限制在 `vla_config.yaml` 的安全范围内。
 
+新版连续自主导航将模型改为 1 Hz 场景采样和有界多轮 Chat 记忆，并由 Nav2 执行连续路径。入口为 `autonomy_console.py`，部署方式见 [README-AUTONOMY.md](README-AUTONOMY.md)。
+
 ## 模式
 
 - `--vla`：仅观察，显示模型输出，不控制小车。

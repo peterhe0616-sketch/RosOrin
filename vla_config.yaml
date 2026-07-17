@@ -2,10 +2,12 @@ model_dir: models/qwen3-vl-4b-int4-ov
 source_model_dir: models/qwen3-vl-4b-source
 device: GPU
 cache_dir: models/qwen3-vl-cache
-instruction: 持续沿可通行区域流畅行驶，接近障碍时选择更开阔的一侧绕行，只有无法通过时停车
-interval_s: 2.0
+instruction: 持续沿可通行区域流畅行驶，接近障碍时选择更开阔的一侧绕行，无法通过时停车
+interval_s: 1.0
 image_max_side: 448
-max_new_tokens: 96
+max_new_tokens: 180
+frames_per_inference: 4
+chat_reset_turns: 12
 
 safety:
   stop_distance_m: 0.16
