@@ -19,8 +19,8 @@ class SemanticSupervisorTests(unittest.TestCase):
     def setUp(self):
         self.policy = SafetyPolicy(
             {
-                "stop_distance_m": 0.45,
-                "turn_clearance_m": 0.30,
+                "stop_distance_m": 0.16,
+                "turn_clearance_m": 0.16,
                 "minimum_confidence": 0.65,
                 "max_result_age_s": 5.0,
                 "max_command_duration_s": 0.6,
@@ -49,7 +49,7 @@ class SemanticSupervisorTests(unittest.TestCase):
 
     def test_front_obstacle_vetoes_forward(self):
         decision = self.policy.evaluate(
-            self.result(), LidarSectors(front=0.30, left=1.0, right=1.0), 0.1
+            self.result(), LidarSectors(front=0.12, left=1.0, right=1.0), 0.1
         )
         self.assertEqual(decision.action, "STOP")
         self.assertEqual(decision.linear, 0.0)

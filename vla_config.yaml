@@ -8,8 +8,8 @@ image_max_side: 448
 max_new_tokens: 96
 
 safety:
-  stop_distance_m: 0.45
-  turn_clearance_m: 0.30
+  stop_distance_m: 0.16
+  turn_clearance_m: 0.16
   minimum_confidence: 0.65
   max_result_age_s: 15.0
   max_command_duration_s: 0.6
