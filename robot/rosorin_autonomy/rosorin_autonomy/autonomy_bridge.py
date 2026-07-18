@@ -10,8 +10,9 @@ from collections import deque
 from pathlib import Path
 
 import rclpy
+from action_msgs.srv import CancelGoal
 from geometry_msgs.msg import PoseStamped, Twist
-from nav2_msgs.action import BackUp, NavigateToPose, Spin
+from nav2_msgs.action import BackUp, NavigateToPose
 from nav2_msgs.srv import SaveMap
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
@@ -59,8 +60,10 @@ class AutonomyBridge(Node):
 
         self.navigate = ActionClient(self, NavigateToPose, "/navigate_to_pose")
         self.backup = ActionClient(self, BackUp, "/backup")
-        self.spin = ActionClient(self, Spin, "/spin")
         self.save_map = self.create_client(SaveMap, "/map_saver/save_map")
+        self.cancel_navigation = self.create_client(
+            CancelGoal, "/navigate_to_pose/_action/cancel_goal"
+        )
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
@@ -70,6 +73,7 @@ class AutonomyBridge(Node):
         self.active_goal: PoseStamped | None = None
         self.paused_goal: PoseStamped | None = None
         self.goal_handle = None
+        self.goal_generation = 0
         self.distance_remaining = math.nan
         self.last_cmd = (0.0, 0.0)
         self.last_safe_cmd = (0.0, 0.0)
@@ -131,26 +135,61 @@ class AutonomyBridge(Node):
         self.send_navigation_goal(msg)
 
     def send_navigation_goal(self, goal_pose: PoseStamped) -> None:
+        with self.lock:
+            self.goal_generation += 1
+            generation = self.goal_generation
+            self.active_goal = goal_pose
+            self.paused_goal = None
+            self.goal_handle = None
+            self.nav_state = "STARTING"
+            self.nav_message = "canceling any previous goal"
+            self.distance_remaining = math.nan
+            self.stuck = False
+        self.cancel_all_navigation_goals(
+            lambda: self.dispatch_navigation_goal(goal_pose, generation)
+        )
+
+    def cancel_all_navigation_goals(self, on_done=None) -> None:
+        """Cancel every Nav2 goal, including handles lost to a callback race."""
+        if not self.cancel_navigation.wait_for_service(timeout_sec=0.5):
+            if on_done:
+                on_done()
+            return
+        future = self.cancel_navigation.call_async(CancelGoal.Request())
+        if on_done:
+            future.add_done_callback(lambda _future: on_done())
+
+    def dispatch_navigation_goal(self, goal_pose: PoseStamped, generation: int) -> None:
         if not self.navigate.wait_for_server(timeout_sec=2.0):
             self.set_state("ERROR", "navigate_to_pose action is unavailable")
             return
+        with self.lock:
+            if generation != self.goal_generation or self.active_goal is None:
+                return
         goal = NavigateToPose.Goal()
         goal.pose = goal_pose
         with self.lock:
-            self.active_goal = goal_pose
-            self.paused_goal = None
             self.nav_state = "STARTING"
             self.nav_message = "sending navigation goal"
-            self.distance_remaining = math.nan
-            self.stuck = False
-        future = self.navigate.send_goal_async(goal, feedback_callback=self.on_feedback)
-        future.add_done_callback(self.on_goal_response)
+        future = self.navigate.send_goal_async(
+            goal,
+            feedback_callback=lambda message: self.on_feedback(message, generation),
+        )
+        future.add_done_callback(
+            lambda done: self.on_goal_response(done, generation, goal_pose)
+        )
 
-    def on_goal_response(self, future) -> None:
+    def on_goal_response(self, future, generation: int, goal_pose: PoseStamped) -> None:
         try:
             handle = future.result()
         except Exception as exc:
             self.set_state("ERROR", f"goal request failed: {exc}")
+            return
+        with self.lock:
+            stale = generation != self.goal_generation or self.active_goal is not goal_pose
+        if stale:
+            if handle.accepted:
+                handle.cancel_goal_async()
             return
         if not handle.accepted:
             self.set_state("REJECTED", "navigation goal rejected")
@@ -160,16 +199,20 @@ class AutonomyBridge(Node):
             self.nav_state = "NAVIGATING"
             self.nav_message = "goal accepted"
         result = handle.get_result_async()
-        result.add_done_callback(self.on_navigation_result)
+        result.add_done_callback(
+            lambda done: self.on_navigation_result(done, handle, generation)
+        )
 
-    def on_feedback(self, feedback_msg) -> None:
+    def on_feedback(self, feedback_msg, generation: int) -> None:
         feedback = feedback_msg.feedback
         with self.lock:
+            if generation != self.goal_generation or self.active_goal is None:
+                return
             self.distance_remaining = float(feedback.distance_remaining)
             self.nav_state = "NAVIGATING"
             self.nav_message = "following path"
 
-    def on_navigation_result(self, future) -> None:
+    def on_navigation_result(self, future, handle, generation: int) -> None:
         try:
             wrapped = future.result()
             status = int(wrapped.status)
@@ -183,6 +226,8 @@ class AutonomyBridge(Node):
         }
         state, message = states.get(status, ("FINISHED", f"action status={status}"))
         with self.lock:
+            if generation != self.goal_generation or self.goal_handle is not handle:
+                return
             self.nav_state = state
             self.nav_message = message
             self.goal_handle = None
@@ -222,19 +267,30 @@ class AutonomyBridge(Node):
     def cancel(self, emergency: bool, state: str = "CANCELED") -> None:
         with self.lock:
             handle = self.goal_handle
+            self.goal_generation += 1
             self.nav_state = state
             self.nav_message = "operator stop" if emergency else state.lower()
             if state != "PAUSED":
                 self.active_goal = None
+            self.goal_handle = None
             if emergency:
                 self.emergency_until = time.monotonic() + 1.0
         if handle is not None:
             handle.cancel_goal_async()
+        self.cancel_all_navigation_goals()
         if emergency:
             self.emergency_pub.publish(Twist())
 
     def run_backup(self, distance_m: float) -> None:
         distance_m = min(0.30, max(0.05, abs(distance_m)))
+        with self.lock:
+            self.goal_generation += 1
+            self.active_goal = None
+            self.goal_handle = None
+        self.set_state("RECOVERING", f"preparing to back up {distance_m:.2f}m")
+        self.cancel_all_navigation_goals(lambda: self.dispatch_backup(distance_m))
+
+    def dispatch_backup(self, distance_m: float) -> None:
         if not self.backup.wait_for_server(timeout_sec=2.0):
             self.set_state("ERROR", "backup action unavailable")
             return
@@ -243,18 +299,57 @@ class AutonomyBridge(Node):
         goal.speed = 0.04
         goal.time_allowance.sec = 8
         self.set_state("RECOVERING", f"backing up {distance_m:.2f}m")
-        self.backup.send_goal_async(goal)
+        future = self.backup.send_goal_async(goal)
+        future.add_done_callback(self.on_backup_response)
+
+    def on_backup_response(self, future) -> None:
+        try:
+            handle = future.result()
+        except Exception as exc:
+            self.set_state("ERROR", f"backup request failed: {exc}")
+            return
+        if not handle.accepted:
+            self.set_state("ERROR", "backup goal rejected")
+            return
+        handle.get_result_async().add_done_callback(self.on_backup_result)
+
+    def on_backup_result(self, future) -> None:
+        try:
+            status = int(future.result().status)
+        except Exception as exc:
+            self.set_state("ERROR", f"backup result failed: {exc}")
+            return
+        if status == 4:
+            self.set_state("IDLE", "backup completed")
+        elif status == 5:
+            self.set_state("CANCELED", "backup canceled")
+        else:
+            self.set_state("ERROR", f"backup failed with action status={status}")
 
     def run_spin(self, angle_rad: float) -> None:
-        angle_rad = min(math.pi, max(-math.pi, angle_rad))
-        if not self.spin.wait_for_server(timeout_sec=2.0):
-            self.set_state("ERROR", "spin action unavailable")
+        """Execute an Ackermann-compatible forward arc instead of an in-place spin."""
+        angle_rad = min(math.radians(45.0), max(math.radians(-45.0), angle_rad))
+        with self.lock:
+            pose = self.map_pose
+        if pose is None:
+            self.set_state("ERROR", "map pose unavailable for arc turn")
             return
-        goal = Spin.Goal()
-        goal.target_yaw = angle_rad
-        goal.time_allowance.sec = 10
-        self.set_state("RECOVERING", f"spinning {math.degrees(angle_rad):.0f}deg")
-        self.spin.send_goal_async(goal)
+        x, y, yaw = pose
+        travel = max(0.24, min(0.36, abs(angle_rad) * 0.45))
+        mid_yaw = yaw + angle_rad / 2.0
+        # The chord heading is reachable by an Ackermann chassis at the goal.
+        # Asking for the full arc angle would make DWB request an impossible
+        # in-place rotation after reaching the XY position.
+        target_yaw = mid_yaw
+        goal = PoseStamped()
+        goal.header.frame_id = "map"
+        goal.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.position.x = x + travel * math.cos(mid_yaw)
+        goal.pose.position.y = y + travel * math.sin(mid_yaw)
+        goal.pose.orientation.z = math.sin(target_yaw / 2.0)
+        goal.pose.orientation.w = math.cos(target_yaw / 2.0)
+        self.set_state("STARTING", f"arc turning {math.degrees(angle_rad):.0f}deg")
+        self.send_navigation_goal(goal)
 
     def run_save_map(self, name: str) -> None:
         safe = "".join(ch for ch in name if ch.isalnum() or ch in "-_") or "rosorin_map"

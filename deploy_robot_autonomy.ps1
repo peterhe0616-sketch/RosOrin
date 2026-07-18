@@ -1,7 +1,8 @@
 param(
     [string]$SshHost = "ros-robot",
     [string]$Container = "MentorPi",
-    [switch]$Start
+    [switch]$Start,
+    [switch]$Restart
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,6 +30,28 @@ try {
 
     Write-Host "ROSOrin autonomy package deployed without reinstalling ROS 2."
     if ($Start) {
+        $IsRunning = $false
+        ssh $SshHost "docker exec $Container pgrep -f '[r]os2 launch rosorin_autonomy system.launch.py' >/dev/null"
+        if ($LASTEXITCODE -eq 0) { $IsRunning = $true }
+
+        $HasVendorDemo = $false
+        ssh $SshHost "docker exec $Container pgrep -f '[y]olo_node' >/dev/null"
+        if ($LASTEXITCODE -eq 0) { $HasVendorDemo = $true }
+
+        if ($Restart -or $HasVendorDemo) {
+            if ($HasVendorDemo) {
+                Write-Host "Conflicting vendor YOLO/demo stack detected; restarting the container cleanly."
+            }
+            ssh $SshHost "docker restart $Container"
+            if ($LASTEXITCODE -ne 0) { throw "Container restart failed" }
+            Start-Sleep -Seconds 6
+            $IsRunning = $false
+        }
+
+        if ($IsRunning) {
+            Write-Host "Autonomy stack is already running; duplicate launch skipped. Use -Restart to reload it."
+            return
+        }
         $Run = "source /home/ubuntu/shared/.typerc >/dev/null && source /opt/ros/humble/setup.bash && source /home/ubuntu/third_party_ros2/third_party_ws/install/setup.bash && source /home/ubuntu/ros2_ws/install/setup.bash && ros2 launch rosorin_autonomy system.launch.py"
         ssh $SshHost "docker exec -d $Container bash -lc '$Run >/home/ubuntu/shared/rosorin_autonomy.log 2>&1'"
         if ($LASTEXITCODE -ne 0) { throw "Autonomy launch failed" }

@@ -149,49 +149,72 @@ class StatefulVLAWorker:
     def __init__(
         self,
         config: dict,
-        on_decision: Callable[[SceneDecision], None] | None = None,
+        on_decision: Callable[[SceneDecision, int], None] | None = None,
         backend_factory=OpenVINOStatefulBackend,
     ) -> None:
         self.config = config
         self.on_decision = on_decision
         self.backend_factory = backend_factory
-        self.queue: queue.Queue[SceneSample | None] = queue.Queue(maxsize=8)
+        self.queue: queue.Queue[tuple[int, SceneSample] | None] = queue.Queue(maxsize=8)
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._run, name="stateful-vla", daemon=True)
         self.status = "starting"
         self.error = ""
+        self.raw_text = ""
         self.decision: SceneDecision | None = None
         self.latency_s = math.nan
         self.sequence = 0
         self.memory = str(config.get("initial_memory", ""))
         self.turns = 0
+        self.generation = 0
+        self.reset_requested = False
 
     def start(self) -> None:
         self.thread.start()
 
     def submit(self, sample: SceneSample) -> bool:
+        with self.lock:
+            item = (self.generation, sample)
         try:
-            self.queue.put_nowait(sample)
+            self.queue.put_nowait(item)
             return True
         except queue.Full:
             try:
                 self.queue.get_nowait()
-                self.queue.put_nowait(sample)
+                self.queue.put_nowait(item)
                 return True
             except (queue.Empty, queue.Full):
                 return False
+
+    def invalidate(self, memory: str | None = None) -> int:
+        """Invalidate queued/in-flight work so it can never dispatch a control action."""
+        with self.lock:
+            self.generation += 1
+            generation = self.generation
+            self.decision = None
+            if memory is not None:
+                self.memory = memory
+            self.reset_requested = True
+        while True:
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                break
+        return generation
 
     def snapshot(self) -> dict:
         with self.lock:
             return {
                 "status": self.status,
                 "error": self.error,
+                "raw_text": self.raw_text,
                 "latency_s": self.latency_s,
                 "sequence": self.sequence,
                 "memory": self.memory,
                 "decision": self.decision.to_dict() if self.decision else None,
                 "queued_frames": self.queue.qsize(),
+                "generation": self.generation,
             }
 
     def _set(self, **values: object) -> None:
@@ -217,46 +240,76 @@ class StatefulVLAWorker:
         max_side = int(self.config.get("image_max_side", 448))
         reset_turns = max(2, int(self.config.get("chat_reset_turns", 12)))
         while not self.stop_event.is_set():
+            with self.lock:
+                reset_requested = self.reset_requested
+                reset_memory = self.memory
+                if reset_requested:
+                    self.reset_requested = False
+            if reset_requested:
+                backend.reset(reset_memory)
+                self.turns = 0
             try:
-                first = self.queue.get(timeout=0.2)
+                first_item = self.queue.get(timeout=0.2)
             except queue.Empty:
                 continue
-            if first is None:
+            if first_item is None:
                 break
-            batch = [first]
-            while len(batch) < max_frames:
+            generation, first = first_item
+            pending = [first]
+            while True:
                 try:
                     item = self.queue.get_nowait()
                 except queue.Empty:
                     break
                 if item is None:
                     break
-                batch.append(item)
+                item_generation, sample = item
+                if item_generation == generation:
+                    pending.append(sample)
+            # Inference must see the newest continuous frames, never an old backlog.
+            batch = pending[-max_frames:]
             latest = batch[-1]
             images = [resize_image(item.frame, max_side) for item in batch]
             if latest.map_image is not None:
                 images.append(resize_image(latest.map_image, max_side))
             prompt = self._build_prompt(batch, latest)
             started = time.monotonic()
+            raw_text = ""
             try:
-                self._set(status="inferencing", error="")
-                decision = parse_scene_decision(backend.generate(images, prompt))
-                self.turns += 1
-                self.memory = decision.memory or self.memory
+                self._set(status="inferencing")
+                raw_text = backend.generate(images, prompt)
+                decision = parse_scene_decision(raw_text)
+                with self.lock:
+                    stale = generation != self.generation
+                    if stale:
+                        self.status = "ready"
+                        self.latency_s = time.monotonic() - started
+                    else:
+                        self.turns += 1
+                        self.memory = decision.memory or self.memory
+                        self.status = "ready"
+                        self.decision = decision
+                        self.error = ""
+                        self.raw_text = raw_text[:4000]
+                        self.latency_s = time.monotonic() - started
+                        self.sequence += 1
+                        memory = self.memory
+                if stale:
+                    continue
                 if self.turns >= reset_turns:
-                    backend.reset(self.memory)
+                    backend.reset(memory)
                     self.turns = 0
-                self._set(
-                    status="ready",
-                    decision=decision,
-                    memory=self.memory,
-                    latency_s=time.monotonic() - started,
-                    sequence=self.sequence + 1,
-                )
                 if self.on_decision:
-                    self.on_decision(decision)
+                    self.on_decision(decision, generation)
             except Exception as exc:
-                self._set(status="ready", error=str(exc), latency_s=time.monotonic() - started)
+                with self.lock:
+                    if generation == self.generation:
+                        self.status = "ready"
+                        self.error = str(exc)
+                        self.raw_text = raw_text[:4000]
+                        self.latency_s = time.monotonic() - started
+                    else:
+                        self.status = "ready"
 
     def _build_prompt(self, batch: list[SceneSample], latest: SceneSample) -> str:
         nav = json.dumps(latest.nav_status, ensure_ascii=False, separators=(",", ":"))
@@ -270,6 +323,11 @@ class StatefulVLAWorker:
             f"激光雷达摘要：{lidar}\n导航与定位状态：{nav}\n"
             f"已有场景记忆：{self.memory or '无'}\n"
             "请基于连续变化而不是孤立单帧给出下一轮高层决策。"
+            "特别注意：导航 JSON 中 map_available=true 表示地图已经加载，禁止再回答等待地图。"
+            "当前任务字段中的探索要求本身就是有效的操作者导航指令，不需要先存在 Nav2 goal。"
+            "如果任务要求探索、状态为 IDLE/SUCCEEDED/FAILED/CANCELED、定位在 map 且雷达至少一个方向明确畅通，"
+            "应给出不超过 0.45 米的 NAVIGATE_RELATIVE 短程目标。"
+            "输出必须紧凑：最多3条观察，每个中文字符串不超过40字，务必闭合完整 JSON。"
         )
 
     def close(self) -> None:

@@ -278,6 +278,7 @@ class AutonomyConsole:
             self.prompt_history.append(self.instruction)
         self.saved_scene_memory = str(saved.get("scene_memory", ""))
         self.auto_dispatch = False
+        self.auto_epoch = -1
         self.last_action = ""
         self.last_sample = 0.0
         self.closed = False
@@ -304,28 +305,52 @@ class AutonomyConsole:
                 self.robot.nav_status = {"state": "OFFLINE", "message": str(exc)}
             return f"机器人连接失败：{exc}"
 
-    def set_instruction(self, instruction: str) -> str:
+    def set_instruction(self, instruction: str) -> tuple[str, bool]:
         instruction = instruction.strip()
         if not instruction:
-            return "提示词不能为空"
+            with self.lock:
+                enabled = self.auto_dispatch
+            return "提示词不能为空", enabled
         with self.lock:
             self.instruction = instruction
             self.prompt_history.append(instruction)
             self.prompt_history = self.prompt_history[-12:]
+            # A changed operator instruction must never consume an old scene result.
+            self.saved_scene_memory = ""
             self._save_memory()
-        return f"实时提示词已生效：{instruction}"
+            enabled = self.auto_dispatch
+        generation = -1
+        if self.worker:
+            generation = self.worker.invalidate(memory="")
+        with self.lock:
+            if self.auto_dispatch:
+                self.auto_epoch = generation
+            enabled = self.auto_dispatch
+
+        compact = instruction.replace(" ", "")
+        if compact.startswith(("立即停止", "马上停止", "紧急停止", "立刻停车", "停下")):
+            result, _ = self.emergency_stop()
+            return f"实时提示词已生效；{result}", False
+        if compact.startswith("暂停"):
+            return f"实时提示词已生效；{self.robot.command('PAUSE')}", enabled
+        if compact.startswith(("继续", "恢复导航", "继续行驶")):
+            return f"实时提示词已生效；{self.robot.command('RESUME')}", enabled
+        return f"实时提示词已生效：{instruction}", enabled
 
     def set_auto_dispatch(self, enabled: bool) -> str:
+        epoch = self.worker.invalidate() if self.worker else -1
         with self.lock:
             self.auto_dispatch = bool(enabled)
+            self.auto_epoch = epoch if enabled else -1
         return "AI 高层目标自动下发：已开启" if enabled else "AI 高层目标自动下发：已关闭（仅观察）"
 
-    def _on_decision(self, decision: SceneDecision) -> None:
+    def _on_decision(self, decision: SceneDecision, generation: int) -> None:
         with self.lock:
             self.saved_scene_memory = decision.memory or self.saved_scene_memory
             self._save_memory()
             enabled = self.auto_dispatch
-        if not enabled or decision.confidence < 0.72:
+            auto_epoch = self.auto_epoch
+        if not enabled or generation != auto_epoch or decision.confidence < 0.72:
             return
         nav, _, _, _ = self.robot.snapshot()
         if decision.behavior == "STOP":
@@ -342,11 +367,39 @@ class AutonomyConsole:
         if pose.get("frame") != "map":
             return
         yaw = math.radians(float(pose.get("yaw_deg", 0.0)))
+        # Keep semantic goals short. Nav2 remains responsible for the continuous
+        # trajectory, while a later VLM turn can extend exploration.
+        forward = decision.forward_m
+        left = decision.left_m
+        distance = math.hypot(forward, left)
+        max_distance = 0.45
+        if distance > max_distance:
+            scale = max_distance / distance
+            forward *= scale
+            left *= scale
         gx, gy, _ = relative_goal_to_map(
-            float(pose["x"]), float(pose["y"]), yaw, decision.forward_m, decision.left_m
+            float(pose["x"]), float(pose["y"]), yaw, forward, left
         )
         target_yaw = math.degrees(yaw) + decision.target_yaw_deg
         self.last_action = self.robot.publish_goal(gx, gy, target_yaw)
+
+    def emergency_stop(self) -> tuple[str, bool]:
+        with self.lock:
+            self.auto_dispatch = False
+            self.auto_epoch = -1
+        if self.worker:
+            self.worker.invalidate()
+        stop_result = self.robot.command("STOP")
+        self.robot.command("CANCEL")
+        return f"{stop_result}；AI 自动下发已关闭", False
+
+    def cancel_autonomy(self) -> tuple[str, bool]:
+        with self.lock:
+            self.auto_dispatch = False
+            self.auto_epoch = -1
+        if self.worker:
+            self.worker.invalidate()
+        return f"{self.robot.command('CANCEL')}；AI 自动下发已关闭", False
 
     def _load_memory(self) -> dict:
         try:
@@ -375,7 +428,8 @@ class AutonomyConsole:
 
     def tick(self):
         frame = self.camera.latest()
-        nav, lidar, _, _ = self.robot.snapshot()
+        nav, lidar, map_snapshot, _ = self.robot.snapshot()
+        nav["map_available"] = map_snapshot is not None
         map_rgb = self.robot.render_map()
         now = time.monotonic()
         if self.worker and frame is not None and now - self.last_sample >= 1.0:
@@ -383,7 +437,8 @@ class AutonomyConsole:
                 instruction = self.instruction
                 history = tuple(self.prompt_history)
             map_bgr = cv2.cvtColor(map_rgb, cv2.COLOR_RGB2BGR)
-            self.worker.submit(SceneSample(frame, instruction, history, lidar, nav, map_bgr))
+            model_map = map_bgr if map_snapshot is not None else None
+            self.worker.submit(SceneSample(frame, instruction, history, lidar, nav, model_map))
             self.last_sample = now
         camera_rgb = (
             cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -455,23 +510,23 @@ def build_ui(console: AutonomyConsole):
             resume = gr.Button("继续")
             cancel = gr.Button("取消目标")
             backup = gr.Button("受控倒车 0.15m")
-            spin = gr.Button("原地旋转 45°")
+            spin = gr.Button("受控左弧转向")
             save = gr.Button("保存地图")
         with gr.Row():
             reasoning = gr.Textbox(label="每轮可核验观察与决策理由", lines=11, interactive=False)
             status = gr.Code(label="实时状态", language="json", lines=16)
 
-        apply_prompt.click(console.set_instruction, instruction, prompt_result)
+        apply_prompt.click(console.set_instruction, instruction, [prompt_result, auto])
         reconnect.click(console.connect_robot, None, prompt_result)
         auto.change(console.set_auto_dispatch, auto, prompt_result)
         send_goal.click(console.goal_from_numbers, [x, y, yaw], prompt_result)
         map_image.select(select_map_goal, None, [x, y, prompt_result])
-        stop.click(lambda: console.robot.command("STOP"), None, prompt_result)
+        stop.click(console.emergency_stop, None, [prompt_result, auto])
         pause.click(lambda: console.robot.command("PAUSE"), None, prompt_result)
         resume.click(lambda: console.robot.command("RESUME"), None, prompt_result)
-        cancel.click(lambda: console.robot.command("CANCEL"), None, prompt_result)
+        cancel.click(console.cancel_autonomy, None, [prompt_result, auto])
         backup.click(lambda: console.robot.command("BACKUP", distance_m=0.15), None, prompt_result)
-        spin.click(lambda: console.robot.command("SPIN", angle_deg=45), None, prompt_result)
+        spin.click(lambda: console.robot.command("SPIN", angle_deg=30), None, prompt_result)
         save.click(lambda: console.robot.command("SAVE_MAP", name="rosorin_map"), None, prompt_result)
         timer = gr.Timer(1.0)
         timer.tick(console.tick, None, [camera, map_image, reasoning, status])
